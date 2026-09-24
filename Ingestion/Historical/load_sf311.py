@@ -40,123 +40,9 @@ def fetch_page(params):
             time.sleep(2 * attempt)
 
 
-def fetch_historical_data(start_date, end_date):
-    records = []
-    offset = 0
-
-    while True:
-        params = {
-            "$where": (
-                f"requested_datetime >= '{start_date}T00:00:00' "
-                f"AND requested_datetime < '{end_date}T00:00:00'"
-            ),
-            "$order": (
-                "requested_datetime ASC, "
-                "service_request_id ASC"
-            ),
-            "$limit": BATCH_SIZE,
-            "$offset": offset
-        }
-
-        page = fetch_page(params)
-
-        if not page:
-            break
-
-        records.extend(page)
-
-        print(
-            f"Fetched {len(page):,} rows "
-            f"| total: {len(records):,}"
-        )
-
-        if len(page) < BATCH_SIZE:
-            break
-
-        offset += BATCH_SIZE
-
-    return records
-
-
-def save_raw_data(records, start_date, end_date):
-    output_dir = Path("data/raw")
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    filename = (
-        f"sf311_"
-        f"{start_date}_"
-        f"{end_date}.jsonl.gz"
-    )
-
-    output_path = output_dir / filename
-
-    with gzip.open(
-        output_path,
-        "wt",
-        encoding="utf-8"
-    ) as file:
-        for record in records:
-            file.write(json.dumps(record))
-            file.write("\n")
-
-    return output_path
-
-
-def save_run_summary(
-    start_date,
-    end_date,
-    row_count,
-    output_path,
-    started_at,
-    completed_at
-):
-    log_dir = Path("data/run_logs")
-    log_dir.mkdir(parents=True, exist_ok=True)
-
-    run_timestamp = started_at.strftime(
-        "%Y%m%d_%H%M%S"
-    )
-
-    log_path = (
-        log_dir
-        / f"historical_load_{run_timestamp}.json"
-    )
-
-    run_info = {
-        "pipeline": "sf311_historical_load",
-        "start_date": start_date,
-        "end_date": end_date,
-        "rows_extracted": row_count,
-        "output_file": str(output_path),
-        "started_at": started_at.isoformat(),
-        "completed_at": completed_at.isoformat(),
-        "status": "success"
-    }
-
-    with open(
-        log_path,
-        "w",
-        encoding="utf-8"
-    ) as file:
-        json.dump(
-            run_info,
-            file,
-            indent=2
-        )
-
-    return log_path
-
-
 def validate_dates(start_date, end_date):
-    start = datetime.strptime(
-        start_date,
-        "%Y-%m-%d"
-    )
-
-    end = datetime.strptime(
-        end_date,
-        "%Y-%m-%d"
-    )
+    start = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
 
     if start >= end:
         raise ValueError(
@@ -164,9 +50,85 @@ def validate_dates(start_date, end_date):
         )
 
 
+def build_output_path(start_date, end_date):
+    output_dir = Path("data/raw")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = (
+        f"sf311_{start_date}_{end_date}.jsonl.gz"
+    )
+
+    return output_dir / filename
+
+
+def download_date_range(
+    start_date,
+    end_date,
+    output_path
+):
+    offset = 0
+    row_count = 0
+
+    temp_path = Path(str(output_path) + ".tmp")
+
+    try:
+        with gzip.open(
+            temp_path,
+            "wt",
+            encoding="utf-8"
+        ) as file:
+
+            while True:
+                params = {
+                    "$where": (
+                        f"requested_datetime >= "
+                        f"'{start_date}T00:00:00' "
+                        f"AND requested_datetime < "
+                        f"'{end_date}T00:00:00'"
+                    ),
+                    "$order": (
+                        "requested_datetime ASC, "
+                        "service_request_id ASC"
+                    ),
+                    "$limit": BATCH_SIZE,
+                    "$offset": offset
+                }
+
+                page = fetch_page(params)
+
+                if not page:
+                    break
+
+                for record in page:
+                    file.write(json.dumps(record))
+                    file.write("\n")
+
+                row_count += len(page)
+
+                print(
+                    f"Fetched {len(page):,} rows "
+                    f"| total: {row_count:,}"
+                )
+
+                if len(page) < BATCH_SIZE:
+                    break
+
+                offset += BATCH_SIZE
+
+        temp_path.replace(output_path)
+
+        return row_count
+
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink()
+
+        raise
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Download historical SF311 data."
+        description="Download one range of SF311 data."
     )
 
     parser.add_argument(
@@ -192,45 +154,27 @@ def main():
         args.end_date
     )
 
-    started_at = datetime.now()
+    output_path = build_output_path(
+        args.start_date,
+        args.end_date
+    )
 
-    print("Starting SF311 historical load")
+    print("Starting SF311 download")
     print(
         f"Date range: "
         f"{args.start_date} to {args.end_date}"
     )
 
-    records = fetch_historical_data(
+    row_count = download_date_range(
         args.start_date,
-        args.end_date
-    )
-
-    if not records:
-        print("No records returned.")
-        return
-
-    output_path = save_raw_data(
-        records,
-        args.start_date,
-        args.end_date
-    )
-
-    completed_at = datetime.now()
-
-    log_path = save_run_summary(
-        start_date=args.start_date,
-        end_date=args.end_date,
-        row_count=len(records),
-        output_path=output_path,
-        started_at=started_at,
-        completed_at=completed_at
+        args.end_date,
+        output_path
     )
 
     print()
-    print("Load complete")
-    print(f"Rows: {len(records):,}")
-    print(f"Raw file: {output_path}")
-    print(f"Run log: {log_path}")
+    print("Download complete")
+    print(f"Rows: {row_count:,}")
+    print(f"File: {output_path}")
 
 
 if __name__ == "__main__":

@@ -234,3 +234,6 @@ __pycache__/
 
 # Mac
 .DS_Store
+# Backfill checkpoints
+data/checkpoints/*
+!data/checkpoints/.gitkeep
